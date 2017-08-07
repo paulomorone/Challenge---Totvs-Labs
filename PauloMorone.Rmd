@@ -1,0 +1,280 @@
+---
+title: "Challenge - Totvs Labs"
+author: "Paulo Morone"
+date: "6 de agosto de 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Challenge
+Este é um Challenge desenvolvido pela Totvs Labs onde visa explorar um dataset com as notas fiscais de um restaurante e desenvolver um modelo preditivo para a próxima semana.
+
+
+```{r libraries, results='hide', message=FALSE, warning=FALSE}
+library(jsonlite)
+library(scales)
+library(dplyr) 
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+library(tidyr)
+```
+
+## Carregando o dataset
+
+```{r Load}
+file <- choose.files(default = "",caption = "Select files", multi = FALSE )
+RawData <- fromJSON(file)
+
+#head(RawData)
+summary(RawData$complemento$valorTotal)
+
+
+ unique(RawData$emit$cnpj) # NF's/ consumo de apenas um estabelecimento
+ range(RawData$ide$dhEmi)  #Periodo analisado
+ unique(RawData$ide$natOp) # Apenas venda
+ 
+ # Desenvolve Dataset que será trabalhado
+ consumo <- data.frame(RawData$complemento, RawData$ide$dhEmi, RawData$infAdic)
+ names(consumo) <- c("Total", "DataHora", "Mesa")
+ consumo <- mutate(consumo, Data = as.Date(consumo$DataHora, format="%Y/%m/%d" ), Hora = format(consumo$DataHora, "%H:%M"))
+ 
+ # Verifica se foi Almoço ou Janta de acordo com o horário da refeição.
+ consumo$Periodo <- ifelse(as.numeric(format(consumo$DataHora, "%H")) < 16,"Almoco", "Jantar")
+ 
+ # Verifica se foi aos finais de semana, 1 = Sim e 0 = Não
+ consumo$Final_Semana <-  ifelse(grepl("feira",weekdays(consumo$Data)) == FALSE, 1, 0)
+ 
+```
+
+## Análise do consumo por dia
+```{r Plot_1}
+
+cons_dia <- consumo %>% group_by(Data, Periodo) %>%
+                  summarise(
+                        cons_medio = mean(Total), 
+                        cons_total = sum(Total),
+                        cons_qtd = length(Total))
+
+
+ba <- ggplot(subset(consumo, Periodo=="Almoco"), aes(x=as.factor(Data), y=Total)) + 
+      geom_boxplot(outlier.colour="red", #outlier.shape=8,
+                   outlier.size=1) +
+      theme(axis.text.x = element_text(hjust = 1, angle = 50)) +
+      xlab("Dia") +
+      ylab("")  +
+      ggtitle("Almoço") +
+      theme_hc()
+
+bj <- ggplot(subset(consumo, Periodo=="Jantar"), aes(x=as.factor(Data), y=Total)) + 
+      geom_boxplot(outlier.colour="red", #outlier.shape=8,
+                   outlier.size=1) +
+      theme(axis.text.x = element_text(hjust = 1, angle = 50)) +
+      xlab("Dia") +
+      ylab("")  +
+      ggtitle("Jantar") +
+      theme_hc()
+
+m <- ggplot(cons_dia, aes(x=Data, y=cons_medio, colour=Periodo)) +
+      geom_line() +
+      scale_x_date(labels = date_format("%d")) +
+      xlab("Dia") +
+      ylab("R$") +
+      ggtitle("Consumo Médio") +
+      theme_hc()
+
+t <- ggplot(cons_dia, aes(x=Data, y=cons_total, colour=Periodo)) +
+     geom_line() +
+     scale_x_date(labels = date_format("%d")) +
+      xlab("Dia") +
+      ylab("R$")  +
+      ggtitle("Consumo Total") +
+      theme_hc()
+
+q <- ggplot(cons_dia, aes(x=Data, y=cons_qtd, colour=Periodo)) +
+     geom_line() +
+     scale_x_date(labels = date_format("%d")) +
+      xlab("Dia") +
+      ylab("Qtd") +
+      ggtitle("Quantidade")+
+      theme_hc()
+
+grid.arrange(ba, bj, ncol=2, top="Consumo Médio")
+
+grid.arrange(arrangeGrob(q,t,nrow=1, as.table=TRUE), arrangeGrob(m, nrow=1), top="Consumo por dia")
+
+rm(cons_dia)
+```
+
+
+### Análise do  giro  do salão
+```{r Giro}
+
+cons_giro <- consumo %>% 
+       group_by(Data, Mesa, Periodo) %>% 
+      summarise(giro = length(Total))
+
+
+giro_almoco <- round(mean(subset(cons_giro, Periodo=="Almoco")$giro), 3)
+giro_jantar <- round(mean(subset(cons_giro, Periodo=="Jantar")$giro), 3)
+
+rm(cons_giro)
+#paste("O giro médio das mesas no Almoço é de apenas",giro_almoco,"e no Jantar ", giro_jantar)
+
+```
+####O giro médio das mesas no Almoço é de apenas 1.001 e no Jantar  1.01
+
+### Análise do consumo detalhado
+```{r Consumo_detalhado}
+
+#Apenas para garantir que o dataset será  criado no loop abaixo e não armazenará dados de execuções passadas.
+if(exists("detalhe_final")){
+      rm(detalhe_final)
+}
+
+# Loop dentro da lista de dets com o detalhamento do consumo.
+dets <- RawData$dets
+n <- length(dets)
+
+for(i in 1:n) {
+      detalhe <- merge(dets[[i]], RawData$ide$dhEmi[[i]])
+      
+      if(exists("detalhe_final")){
+            detalhe_final <- rbind(detalhe_final, data.frame(detalhe$nItem, detalhe$prod,detalhe$y))
+      }else {
+            detalhe_final<- data.frame(detalhe$nItem, detalhe$prod,detalhe$y)
+      }
+      
+}
+
+detalhe_final$Periodo <- ifelse(as.numeric(format(detalhe_final$detalhe.y, "%H")) < 16,"Almoco", "Jantar")
+
+rm(detalhe) # Deleta variável utilizada no meio para não consumir memória.
+
+agg_kg <- detalhe_final %>% 
+      group_by(uCom, Periodo) %>%
+      summarise(media = mean(qCom),
+                vmedio = mean(vProd)
+      )
+names(agg_kg) <- c("Tipo", "Periodo", "media", "vmedio")
+
+p<-ggplot(data=agg_kg, aes(x=Periodo, y=vmedio, fill=Tipo)) +
+      geom_bar(stat="identity")+
+      geom_text(aes(label=paste("R$",round(vmedio,2))), vjust=2, colour="white") +
+      ylab("") +
+      theme_pander() +
+      scale_fill_pander() +
+      ggtitle("Valor médio  - R$")
+p
+
+p2<-ggplot(data=subset(agg_kg, Tipo=="KG"), aes(x=Periodo, y=media, fill=Tipo)) +
+      geom_bar(stat="identity")+
+      geom_text(aes(label=paste("Kg ",round(media,2))), vjust=3, colour="white") +
+      theme_pander() +
+      scale_fill_pander() +
+      ggtitle("Kilo")
+#p2
+
+p3<-ggplot(data=subset(agg_kg, Tipo=="UN"), aes(x=Periodo, y=media, fill=Tipo)) +
+      geom_bar(stat="identity")+
+      geom_text(aes(label=round(media,2)), vjust=3, colour="white") +
+      theme_pander() +
+      scale_fill_pander() +
+      ggtitle("Bebida")
+#p3
+
+grid.arrange(p2, p3, ncol=2, top="Consumação do período")
+
+rm(agg_kg)
+rm(dets)
+```
+
+
+```{r Modelo}
+
+# Função para remoção dos outliers
+outliers <- function(x, na.rm = TRUE, ...) {
+  qnt <- quantile(x, probs=c(.25, .75), na.rm = na.rm, ...)
+  H <- 1.5 * IQR(x, na.rm = na.rm)
+  y <- x
+  y[x < (qnt[1] - H)] <- NA
+  y[x > (qnt[2] + H)] <- NA
+  y
+}
+
+# Remove o valor e em seguida o registro dos outliers.
+consumo$Total <- outliers(consumo$Total)
+consumo <- consumo %>%
+            filter(Total != 'NA')
+
+# Cria dataset agregado
+agg_modelo <- consumo %>% 
+      group_by(Data, Final_Semana) %>%
+      summarise(vmedio = mean(Total),
+                vtotal = sum(Total)
+      )
+
+# Modelo de regressão linear
+mod1 <- lm(vtotal ~ Data, agg_modelo)
+# Testar outros modelos
+mod2 <- update(mod1, vtotal ~ Data + Final_Semana)
+
+#Comparar os modelos
+anova(mod1, mod2)
+summary(mod2)$coef
+
+par(mfrow=c(2, 2))
+plot(mod2)
+
+```
+Apesar do modelo não ter grande diferença com relação ao primeiro modelo, resolvi aplicar o segundo que considera a variável Final Semana.
+
+##Modelo preditivo 
+```{r Predict}
+if ( exists("pnew") ){
+      rm(pnew)
+}
+
+# Função simples para identificação de finais de semana
+Fds <- function(x) {
+      if (grepl("feira",weekdays(x)) == FALSE) {1} else {0} 
+}
+
+#Quantidade de dias a serem estimados
+qtd_dias <- 7
+
+
+#Primeiro dia a ser estimado
+Data <- max(consumo$Data) +1
+Final_Semana <- Fds(Data)
+pnew <- data.frame(Data, Final_Semana)
+
+#Monta Dataset com os dias a serem estimados
+for(i in length(pnew):qtd_dias) {
+      Data = Data + 1
+      Final_Semana <- ifelse(grepl("feira",weekdays(Data)) == FALSE, 1, 0)
+      pnew <- rbind(pnew, data.frame(Data, Final_Semana))
+
+}
+
+#Adiciona coluna com o valor de precisao de acordo com o modelo mod2
+predicao <- predict(mod2, pnew)
+predicao <- data.frame(predicao)
+pnew$Valor <- predicao
+
+pnew
+
+pp<-ggplot(data=pnew, aes(x=Data, y=predicao)) +
+      geom_line() +
+      stat_smooth(method = lm)+
+      scale_x_date(labels = date_format("%d")) +
+      scale_y_continuous() +
+      geom_text(aes(label=round(predicao,2)), vjust=3, colour="black") +
+      ggtitle("Estimativa em Reais") +
+      theme_hc()
+pp
+
+```
