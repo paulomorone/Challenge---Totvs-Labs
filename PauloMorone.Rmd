@@ -1,7 +1,7 @@
 ---
-title: "Challenge - Totvs Labs"
+title: "Totvs Labs - Challenge"
 author: "Paulo Morone"
-date: "6 de agosto de 2017"
+date: "12 de setembro de 2017"
 output: html_document
 ---
 
@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # Data Challenge
-Este é um Challenge desenvolvido pela Totvs Labs onde visa explorar um dataset com as notas fiscais de um restaurante e desenvolver um modelo preditivo para a próxima semana.
+Este é um Challenge desenvolvido pela Totvs Labs onde visa explorar um dataset com as notas fiscais de um restaurante e desenvolver um modelo preditivo para a semana seguinte a última semana dos dados.
 
 
 ```{r libraries, results='hide', message=FALSE, warning=FALSE}
@@ -21,6 +21,8 @@ library(ggplot2)
 library(ggthemes)
 library(gridExtra)
 library(tidyr)
+library(prophet)
+library(caret)
 ```
 
 ## Carregando o dataset
@@ -47,6 +49,9 @@ summary(RawData$complemento$valorTotal)
  
  # Verifica se foi aos finais de semana, 1 = Sim e 0 = Não
  consumo$Final_Semana <-  ifelse(grepl("feira",weekdays(consumo$Data)) == FALSE, 1, 0)
+ 
+ # Dia da semana
+ consumo$Dia_Semana <- weekdays(consumo$Data)
  
 ```
 
@@ -122,10 +127,12 @@ giro_almoco <- round(mean(subset(cons_giro, Periodo=="Almoco")$giro), 3)
 giro_jantar <- round(mean(subset(cons_giro, Periodo=="Jantar")$giro), 3)
 
 rm(cons_giro)
+length(unique(consumo$Mesa))
 #paste("O giro médio das mesas no Almoço é de apenas",giro_almoco,"e no Jantar ", giro_jantar)
 
+
 ```
-####O giro médio das mesas no Almoço é de apenas 1.001 e no Jantar  1.01
+####O giro médio das mesas no Almoço é de apenas 1.001 e no Jantar  1.01, ou se ja  o restaurante serve em média 83 refeições por periodo.
 
 ### Análise do consumo detalhado
 ```{r Consumo_detalhado}
@@ -192,8 +199,8 @@ rm(agg_kg)
 rm(dets)
 ```
 
-
-```{r Modelo}
+## Preparando a base para aplicar os modelos.
+```{r PreparaDataset}
 
 # Função para remoção dos outliers
 outliers <- function(x, na.rm = TRUE, ...) {
@@ -206,33 +213,98 @@ outliers <- function(x, na.rm = TRUE, ...) {
 }
 
 # Remove o valor e em seguida o registro dos outliers.
-consumo$Total <- outliers(consumo$Total)
-consumo <- consumo %>%
-            filter(Total != 'NA')
+#consumo$Total <- outliers(consumo$Total)
+#consumo <- consumo %>%
+#            filter(Total != 'NA')
+
+
+freq_per <- as.data.frame(table(consumo$Data,consumo$Periodo))
+names(freq_per) <- c("Data", "Periodo", "Freq")
+
+jantar <- freq_per %>% 
+      filter(Periodo == "Jantar")
+jantar$Periodo <- NULL
+jantar$Data <- as.Date(jantar$Data)
+names(jantar) <- c("Data", "Qtd_Jantar")
+
 
 # Cria dataset agregado
 agg_modelo <- consumo %>% 
-      group_by(Data, Final_Semana) %>%
-      summarise(vmedio = mean(Total),
-                vtotal = sum(Total)
-      )
+      group_by(Data, Final_Semana, Dia_Semana) %>%
+      summarise(vtotal = sum(Total)) %>%
+      left_join(jantar, by = "Data") 
 
+agg_modelo$Jantar_Dia <- ifelse(agg_modelo$Qtd_Jantar > 0, 1, 0)
+agg_modelo$Qtd_Jantar <- NULL
+
+#inTrain <- createDataPartition(y=agg_modelo$vtotal, p=0.7, list=FALSE)
+#training <- agg_modelo[inTrain,]
+#testing <- agg_modelo[-inTrain,]
+
+l <- round(nrow(agg_modelo) * 0.3)
+testing <- tail(agg_modelo, l)
+training <- head(agg_modelo, nrow(agg_modelo) - l)
+
+
+rm(jantar)
+```
+
+### 1. Regressão Linear
+```{r RegrassaoLinear, results='hide', message=FALSE, warning=FALSE}
 # Modelo de regressão linear
-mod1 <- lm(vtotal ~ Data, agg_modelo)
-# Testar outros modelos
-mod2 <- update(mod1, vtotal ~ Data + Final_Semana)
+mod_lin <- train(vtotal ~ ., method = "lm", data = training)
+pred_lin <- predict(mod_lin,newdata=testing)
+```
 
-#Comparar os modelos
-anova(mod1, mod2)
-summary(mod2)$coef
+### 2. Prophet
+```{r prophet, results='hide', message=FALSE, warning=FALSE}
+# Modelo de regressão usando a biblioteca prophet desenvolvido pela Google
 
-par(mfrow=c(2, 2))
-plot(mod2)
+
+df <- data.frame(training[c("Data", "vtotal", "Final_Semana", "Dia_Semana", "Jantar_Dia" )])
+names(df) <- c("ds", "y", "Final_Semana", "Dia_Semana", "Jantar_Dia" )
+
+#df <- data.frame(df)
+
+mod_prophet <- prophet(df)
+
+future <- make_future_dataframe(mod_prophet, periods = 5)
+
+forecast <- predict(mod_prophet,future)
+
+pred_prophet <- forecast %>% 
+      filter(ds >= min(testing$Data)) %>%
+      select(Data = ds, prophet = yhat) %>%
+      as.data.frame()
+
+rm(df)
+rm(forecast)
 
 ```
-Apesar do modelo não ter grande diferença com relação ao primeiro modelo, resolvi aplicar o segundo que considera a variável Final Semana.
 
-##Modelo preditivo 
+## Comparando os modelos
+```{r comparando}
+
+testing$linear <- pred_lin
+testing <- merge(testing, pred_prophet)
+
+c <-ggplot(data=testing, aes(Data)) +
+      geom_line(aes(y = vtotal, colour="Valor Total")) +
+      geom_line(aes(y = linear, colour="Predição Linear")) +
+      geom_line(aes(y = prophet, colour="Predição Prophet")) +
+      theme_pander() +
+      scale_fill_pander() +
+      ggtitle("Modelo")
+c
+
+summary(mod_lin)
+
+```
+
+Pelo gráfico foi possível notar que a regressão linear se aproxima melhor do valor real e através da da tabela (summary) é possível identificar que o mesmo possui P-Value consideravelmente baixo com os dias da semana sendo grandes influenciadores.
+
+## Modelo preditivo 
+Uma vez que a regressão linear teve melhor desempenho, irei utiliza-lo para prever a semana seguinte ao dataset.
 ```{r Predict}
 if ( exists("pnew") ){
       rm(pnew)
@@ -247,21 +319,37 @@ Fds <- function(x) {
 qtd_dias <- 7
 
 
-#Primeiro dia a ser estimado
-Data <- max(consumo$Data) +1
+#Primeiro dia a ser estimado que não seja DOMINGO
+#Data <- max(agg_modelo$Data) +1
+
+if ( weekdays(max(agg_modelo$Data) +1) == "domingo") {
+      Data <- max(agg_modelo$Data) +2
+} else {
+      Data <- max(agg_modelo$Data) +1
+}
 Final_Semana <- Fds(Data)
-pnew <- data.frame(Data, Final_Semana)
+Dia_Semana <- weekdays(Data)
+pnew <- data.frame(Data, Final_Semana, Dia_Semana)
+pnew$Jantar_Dia <- if(pnew$Dia_Semana == c("quinta-feira","sexta-feira","sábado")) {1} else {0}
+
+
+
 
 #Monta Dataset com os dias a serem estimados
 for(i in length(pnew):qtd_dias) {
       Data = Data + 1
       Final_Semana <- ifelse(grepl("feira",weekdays(Data)) == FALSE, 1, 0)
-      pnew <- rbind(pnew, data.frame(Data, Final_Semana))
+     # Final_Semana <- Fds(Data)
+      Dia_Semana <- weekdays(Data)
+      Jantar_Dia <- 0
+      pnew <- rbind(pnew, data.frame(Data, Final_Semana, Dia_Semana, Jantar_Dia))
 
 }
 
+pnew$Jantar_Dia <- ifelse(pnew$Dia_Semana == c("quinta-feira","sexta-feira","sábado"), 0, 1)
+
 #Adiciona coluna com o valor de precisao de acordo com o modelo mod2
-predicao <- predict(mod2, pnew)
+predicao <- predict(mod_lin, pnew)
 predicao <- data.frame(predicao)
 pnew$Valor <- predicao
 
@@ -270,11 +358,13 @@ pnew
 pp<-ggplot(data=pnew, aes(x=Data, y=predicao)) +
       geom_line() +
       stat_smooth(method = lm)+
-      scale_x_date(labels = date_format("%d")) +
       scale_y_continuous() +
       geom_text(aes(label=round(predicao,2)), vjust=3, colour="black") +
-      ggtitle("Estimativa em Reais") +
+      ggtitle("Estimativa de venda em Reais") +
       theme_hc()
 pp
-
 ```
+
+
+
+
